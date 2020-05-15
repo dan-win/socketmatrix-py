@@ -1,0 +1,44 @@
+# Compiled python modules.
+*.pyc
+__pycache__/
+
+# pyenv
+.python-version
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+.env
+
+# draft (custom) prefix
+-*
+
+# gitlab-ci:
+builds/*
+cache/*
+
+# tox:
+*.tox/
+
+docs/_build/doctrees/
+docs/_build/latex/
+docs/_static/*
+docs/_templates/*
+
