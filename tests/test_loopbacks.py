@@ -11,9 +11,13 @@ import threading
 import argparse
 import asyncio
 
-from sockmatrix import (
+from socketmatrix import (
     SocketConsumer,
-    SocketProducer
+    SocketProducer,
+    ServiceMatrix,
+    # start_services,
+    # run_services,
+    # stop_services
 )
 
 class config:
@@ -25,94 +29,79 @@ class config:
 class test_unix_socket(unittest.TestCase):
 
     def setUp(self):
-        import sockmatrix 
-        self.sockmatrix = sockmatrix
+        ServiceMatrix.cleanup()
+
+
+    def tearDown(self):
+        ServiceMatrix.cleanup()
+
+
+    # @timeout_decorator.timeout(5, timeout_exception=StopIteration)
+    def test_channel_integrity_unix(self):
+        # Prepare test config
 
         from os.path import (expanduser, join)
-        # # home = expanduser("~")
-        self.HOME_DIR = expanduser("~")
-        self.sock_path = 'unix:' + join(self.HOME_DIR, 'sockmatrix.sock')
+        home_dir = expanduser("~")
+        sock_path = 'unix:' + join(home_dir, 'sockmatrix.sock')
+        print("Socket path: ", sock_path)
+        conf = config(sock_path)
 
-        print("Socket path: ", self.sock_path)
+        print(70 * '+')
+        results = []
 
-        self.conf = config(self.sock_path)
+        messages_set = range(10, 16)
 
-        # parser = argparse.ArgumentParser()
-        # parser.add_argument('--addr', default=f'unix:{self.sock_path}', type=str)
-        # parser.add_argument('--print', default=False, action='store_true')
-        # parser.add_argument('--ssl', default=False, action='store_true')
+        @SocketConsumer(topic="")
+        def handle(data):
+            print("GOT", data)
+            results.append(data)
 
-        # self.conf = parser.parse_args(['--addr', f'unix:{self.sock_path}'])
+        @SocketProducer(socket_addr=sock_path)
+        def send_message(data):
+            return data
+
+        async def make_messages(loop):
+            await asyncio.sleep(1, loop=loop)
+            for i in messages_set:
+                print("SEND", i)
+                try:
+                    send_message(dict(data=i))
+                except Exception as e:
+                    print("Error in producer: ", e)
+    
+                await asyncio.sleep(0.1, loop)
+
+            # Pass quit signal after 3 second
+            await send_stop(loop, 3)
 
         # import uvloop
         # loop = uvloop.new_event_loop()
 
         # asyncio.set_event_loop(loop)
-        # loop.set_debug(True)
-        # self.loop = loop
+        loop = asyncio.get_event_loop()
+        loop.set_debug(True)
 
-    def tearDown(self):
-        # self.loop.close()
-        pass
+        loop = ServiceMatrix.start_services(conf, loop=loop)
+        
+        loop.create_task(make_messages(loop))
 
-
-    # @timeout_decorator.timeout(5, timeout_exception=StopIteration)
-    def test_exit_with_empty_queue(self):
-        conf = self.conf
-
-        async def pass_stop_signal(srv_man, sync_evt):
-            while True:
-                await asyncio.sleep(1)
-                if sync_evt.is_set():
-                    srv_man.close()
-                    return
-
-        def services_thread(*, conf, evt_stop):
-            import uvloop
-            loop = uvloop.new_event_loop()
-
-            asyncio.set_event_loop(loop)
-            loop.set_debug(True)
-            try:
-                print(type(conf), conf, type(conf.addr), conf.addr)
-                print("Passing arguments: ", conf, evt_stop)
-                srv = SocketConsumer.create_server(loop, conf)
-                SocketProducer.start(loop)
-
-                # loop.create_task()
-
-                print("[1] Loop starting...")
-                loop.run_until_complete(pass_stop_signal(srv, evt_stop))
-                print("[2] Loop done")
-            finally:
-                loop.close()
-                print("[3] Loop closed")
-            
-
-        print(70 * '+')
-        results = []
-
-        @SocketConsumer(topic="")
-        def handle(data):
-            results.append(data)
-
-        @SocketProducer(socket_addr=self.sock_path)
-        def send_message(data):
-            return data
-
-        evt_stop = threading.Event()
-        handle = threading.Thread(target=services_thread, kwargs=dict(conf=conf, evt_stop=evt_stop))
-        handle.start()
-
-        # SocketProducer.wait_connection(3)
-        for i in range(10,16):
-            send_message(i)
-
-        # Send stop signal after delay        
-        threading.Timer(5, evt_stop.set).start()
-
-        handle.join()
+        print("[1] Loop starting...")
+        ServiceMatrix.run_services()
+        print("[2] Loop done")
 
         print("Result in test: ", results)
-        # self.assertEqual(e_result, 0)
+
+        values = [r['data'] for r in results]
+        values.sort()
+        self.assertListEqual(values, list(messages_set))
+
+
+# Helpers
+async def send_stop(loop, delay):
+    await asyncio.sleep(delay, loop=loop)
+    print("Sending stop...")
+    try:
+        ServiceMatrix.stop_services()
+    except Exception as e:
+        print("Error on stop_services: ", e)
 

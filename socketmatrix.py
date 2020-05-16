@@ -16,6 +16,7 @@ import queue as sync_queue
 import re
 import json
 import time
+import signal
 
 PRINT = 0
 
@@ -27,6 +28,9 @@ logging.basicConfig(level=LOGLEVEL)
 log = logging
 
 class JsonConsumerProtocol(asyncio.Protocol):
+    def __init__(self, loop):
+        self.loop = loop
+
     def connection_made(self, transport):
         self.exc = None
         self.transport = transport
@@ -50,6 +54,7 @@ class JsonProducerProtocol(asyncio.Protocol):
     def __init__(self, loop):
         self.queue = None
         self.loop = loop
+        self.runner = None
       
     def connection_made(self, transport):
         log.debug("Producer socket connected")
@@ -57,7 +62,7 @@ class JsonProducerProtocol(asyncio.Protocol):
         self.queue = asyncio.Queue()
         self.transport = transport
         # Start loop
-        self.loop.create_task(self.run())
+        self.runner = self.loop.create_task(self.run())
 
     def connection_lost(self, exc):
         log.warn('The server closed the connection: %s', exc)
@@ -65,6 +70,9 @@ class JsonProducerProtocol(asyncio.Protocol):
         self.transport = None
         self.queue = None
         self.exc = exc
+        if self.runner is not None:
+            self.runner.cancel()
+            self.runner = None
 
     def data_received(self, data):
         log.debug('Data received: {!r}'.format(data.decode()))
@@ -73,14 +81,23 @@ class JsonProducerProtocol(asyncio.Protocol):
         log.debug("Producer Protocol: starting relay loop")
         try:
             while True:
+                if self.transport is None:
+                    await asyncio.sleep(1)
+                    continue
                 message = await self.queue.get()
                 if message == SENTINEL or self.transport is None:
                     log.debug("Producer Protocol: breaking relay loop")
                     break
                 message["user-agent"] = __name__
                 serialized = json.dumps(message).encode()
-                self.transport.write(serialized)
-                self.transport.write(b"\n")
+                while True:
+                    try:
+                        self.transport.write(serialized)
+                        self.transport.write(b"\n")
+                    except BlockingIOError:
+                        continue
+                    break
+                
                 log.debug("Producer Protocol: message sent [Ok]")
                 await asyncio.sleep(0.5)
         except Exception as e:
@@ -101,14 +118,16 @@ class ServerManager:
         self.asyncio_server = asyncio_server
         # self.interrupt = threading.Event()
 
-    def send_close_signal(self):
-        # self.interrupt.
-        log.debug("Sending close signal...")
-        asyncio.get_event_loop().call_soon_threadsafe(self.asyncio_server.close)
+    # def send_close_signal(self):
+    #     # self.interrupt.
+    #     log.debug("Sending close signal...")
+    #     asyncio.get_event_loop().call_soon_threadsafe(self.asyncio_server.close)
 
-    def close(self):
+    async def close(self):
+        asyncio_server = self.asyncio_server.result() # Unwrap task
         log.debug("Closing server...")
-        self.asyncio_server.close()
+        asyncio_server.close()
+        await asyncio_server.wait_closed()
         log.debug("Server is closed now")
         if self.unix_socket:
             import stat
@@ -116,11 +135,12 @@ class ServerManager:
             if os.path.exists(sock_path):
             # if stat.S_ISSOCK(os.stat(sock_path).st_mode):
                 os.remove(sock_path)
-
+        return True
 
 class SocketConsumer:
 
     _handlers = {}
+    _srv = None
 
     def __init__(self, *, topic=None, **kwargs):
         super().__init__(**kwargs)
@@ -130,7 +150,7 @@ class SocketConsumer:
 
     def __call__(self, f):
         def wrapper(request_bytes):
-            f(request_bytes)
+            return f(request_bytes)
         topic = self.topic
         SocketConsumer._handlers[topic] = wrapper
         return f
@@ -153,16 +173,9 @@ class SocketConsumer:
                 server_context.check_hostname = False
             server_context.verify_mode = ssl.CERT_NONE
 
-        protocol = JsonConsumerProtocol
+        protocol = lambda: JsonConsumerProtocol(loop)
 
         unix, addr = _decode_address(args.addr)
-        # if args.addr.startswith('unix:'):
-        #     unix = True
-        #     addr = args.addr[5:]
-        # else:
-        #     addr = args.addr.split(':')
-        #     addr[1] = int(addr[1])
-        #     addr = tuple(addr)
 
         sock_path = None
         if unix:
@@ -197,8 +210,17 @@ class SocketConsumer:
         else:
             server = loop.create_server(protocol, *addr,
                                         ssl=server_context)
-        loop.create_task(server)
-        return ServerManager(unix_socket=sock_path, asyncio_server=server)
+        srv_task = loop.create_task(server)
+        # server_obj = loop.run_until_complete(server)
+        cls._srv = ServerManager(unix_socket=sock_path, asyncio_server=srv_task)
+        return cls._srv
+
+    @classmethod
+    async def stop(cls, loop):
+        if cls._srv is not None:
+            # loop.stop()
+            await cls._srv.close()
+            cls._srv = None
 
 SENTINEL = (None,)
 
@@ -206,33 +228,33 @@ SENTINEL = (None,)
 class SocketProducer:
     _clients = []
 
+
+
     def __init__(self, *, socket_addr, **kwargs):
         self.queue = None
         self.addr = socket_addr
+        self.loop = None
         SocketProducer._clients.append(self)
     
     def __call__(self, f):
         def wrapper(*args, **kwargs):
             response = f(*args, **kwargs)
             if self.queue is not None:
+                print("PRODUCER: putting to queue")
                 self.queue.put_nowait(response)
-            else:
-                self.wait_connection()
+            elif self.loop is not None:
+                print("PRODUCER: waiting for connection .........")
+                res = self.loop.run_until_complete(self.wait_connection())
+                print(res, dir(res))
                 # Note that recursion is not infinite because wait_connection raises TimeoutError
                 response = wrapper(*args, **kwargs)
+            else:
+                raise ConnectionRefusedError("Cannot produce message before services start")
             return response
         return wrapper
     
     async def create_task(self, loop):
         unix, addr = _decode_address(self.addr)
-        # if self.addr.startswith('unix:'):
-        #     unix = True
-        #     addr = self.addr[5:]
-        # else:
-        #     # addr = self.addr
-        #     addr = self.addr.split(':')
-        #     addr[1] = int(addr[1])
-        #     addr = tuple(addr)
 
         try:
             if unix:
@@ -257,10 +279,18 @@ class SocketProducer:
                                 sock=sock)
                 log.debug("Producer connection established [Ok] at %s", addr)
                 self.queue = asyncio.Queue(loop=loop)
+                self.loop = loop
                 while True:
                     message = await self.queue.get()
                     await proto.send_message(message)
+                    # Do that only after passing message to protocol handler (in order to allow stop protocol loops also)
+                    if message == SENTINEL:
+                        break
                     await asyncio.sleep(0.5)
+
+            self.queue = None
+            log.info("Producer - closing connection at %s", addr)
+                
 
         except ConnectionRefusedError as e:
             log.error('Connection refused: %s', e)
@@ -269,6 +299,9 @@ class SocketProducer:
         except Exception as e:
             log.error('Error in producer: %s: %s', addr, e)
     
+    async def try_send_message(self, message):
+        if self.queue is not None:
+            await self.queue.put(message)
 
     @classmethod
     def start(cls, loop):
@@ -277,11 +310,17 @@ class SocketProducer:
             log.debug("Starting producer...")
             loop.create_task(task)
 
+    @classmethod
+    async def stop(cls, loop):
+        for instance in cls._clients:
+            log.debug("Stopping producers...")
+            await instance.try_send_message(SENTINEL)
+
     @property
     def connected(self):
         return self.queue is not None
 
-    def wait_connection(self, timeout=5):
+    async def wait_connection(self, timeout=5):
         retry_interval = 0.5
         start = time.time()
         while True:
@@ -293,42 +332,159 @@ class SocketProducer:
             if elapsed_time > timeout:
                 raise TimeoutError("producer timeout error")
             else:
-                time.sleep(retry_interval)
+                await asyncio.sleep(retry_interval)
 
+from enum import Enum
 
+class ServiceState(Enum):
+    IDLE = 0
+    STARTING = 1
+    RUNNING = 2
+    STOPPING = 3
+    DONE = 4
+    ERROR = -1
 
-def run_server(args):
+class StateError(BaseException):
+    "Invalid operation for current state"
 
-    import uvloop
-    loop = uvloop.new_event_loop()
+class ServiceMatrix:
 
-    asyncio.set_event_loop(loop)
-    loop.set_debug(True)
+    _STOP_HANDLE = None
+    loop = None
+    _state = ServiceState.IDLE
 
-    if args.print:
-        PRINT = 1
+    @classmethod
+    def cleanup(cls):
+        SocketConsumer._handlers = {}
+        SocketConsumer._srv = None
+        SocketProducer._clients = []
+        cls._STOP_HANDLE = None
+        cls.loop = None
+        cls._state = ServiceState.IDLE
 
-    if hasattr(loop, 'print_debug_info'):
-        loop.create_task(print_debug(loop))
-        PRINT = 0
+    @classmethod
+    def start_services(cls, args, *, loop=None):
+        if cls._state != ServiceState.IDLE:
+            raise StateError()
 
-    log.info('serving on: {}'.format(args.addr))
+        if loop is None:
+            import uvloop
+            loop = uvloop.new_event_loop()
 
-    SocketProducer.start(loop)
-    srv = SocketConsumer.create_server(loop, args)
+            asyncio.set_event_loop(loop)
+            loop.set_debug(True)
+        
+        cls.loop = loop
 
-    try:
-        loop.run_forever()
-    except KeyboardInterrupt:
-        log.info('Closing connection')
-    finally:
+        def handle_exception(loop, exc_context):
+            print("Async Error: ", exc_context)
+            log.error("Async Error: %s| %r | %s", exc_context["message"], exc_context.get("exception"), exc_context.get("source_traceback"))
+
+        loop.set_exception_handler(handle_exception)
+
+        if args.print:
+            PRINT = 1
+
         if hasattr(loop, 'print_debug_info'):
-            gc.collect()
-            print(chr(27) + "[2J")
-            loop.print_debug_info()
+            loop.create_task(print_debug(loop))
+            PRINT = 0
 
-        loop.close()
-        srv.close()
+        SocketConsumer.create_server(loop, args)
+        SocketProducer.start(loop)
+        cls._state = ServiceState.STARTING
+        return loop
+
+    @classmethod
+    def run_services(cls):
+        if cls._state != ServiceState.STARTING:
+            raise StateError()
+
+        stop_event = asyncio.Event(loop=cls.loop)
+        cls._STOP_HANDLE = stop_event
+
+        # def catch_signal(signal, loop):
+        #     log.info('Got signal: %s', signal)
+        #     # loop.call_soon_threadsafe(stop_event.set)
+        #     # await close_all(loop)
+        #     loop.create_task(close_all(loop))
+
+        # import functools
+        # signals = (signal.SIGHUP, signal.SIGTERM, signal.SIGINT)
+        # for s in signals:
+        #     loop.add_signal_handler(
+        #         s, functools.partial(catch_signal, s, loop))
+
+        async def close_all(loop):
+            print("Exit signal occurs........")
+            # Run exit code...
+
+            await SocketProducer.stop(loop)
+            await SocketConsumer.stop(loop)
+
+            print("Exit signal occurs........ 1")
+
+            # loop.run_until_complete(srv.close())
+            tasks = [t for t in asyncio.Task.all_tasks() if t is not
+                    asyncio.Task.current_task()]
+
+            print("Exit signal occurs........ 2")
+
+            [task.cancel() for task in tasks]
+            log.info('Cancelling %s outstanding tasks', len(tasks))
+            await asyncio.gather(*tasks, return_exceptions=True)
+            loop.stop()
+            loop.close()
+            log.info('All pending tasks are finished now')
+
+            log.info("Done")
+            cls._STOP_HANDLE = None
+            cls._state = ServiceState.DONE
+
+        async def main(loop):
+            await stop_event.wait()
+            await close_all(loop)
+
+        cls.loop.create_task(main(cls.loop))
+        cls._state = ServiceState.RUNNING
+        cls.loop.run_forever()
+
+    @classmethod
+    def stop_services(cls):
+        if not cls._STOP_HANDLE:
+            return
+        cls._STOP_HANDLE.set()
+        # if hasattr(loop, 'print_debug_info'):
+        #     gc.collect()
+        #     print(chr(27) + "[2J")
+        #     loop.print_debug_info()
+
+        # SocketProducer.stop(loop)
+        # SocketConsumer.stop(loop)
+        # # loop.run_until_complete(srv.close())
+        # tasks = [t for t in asyncio.Task.all_tasks() if t is not
+        #         asyncio.Task.current_task()]
+
+        # [task.cancel() for task in tasks]
+        # log.info('Cancelling %s outstanding tasks', len(tasks))
+        # loop.stop()
+        # loop.run_until_complete(asyncio.gather(*tasks, return_exceptions=True))
+
+        # loop.close()
+
+
+    @classmethod
+    def run(cls, args):
+
+        loop = cls.start_services(args)
+
+        log.info('serving on: {}'.format(args.addr))
+
+        try:
+            cls.run_services()
+        except KeyboardInterrupt:
+            log.info('Closing connection')
+        finally:
+            cls.stop_services()
 
 async def print_debug(loop):
     while True:
@@ -373,4 +529,4 @@ if __name__ == '__main__':
     parser.add_argument('--ssl', default=False, action='store_true')
     args = parser.parse_args()
 
-    run_server(args)
+    ServiceMatrix.run(args)

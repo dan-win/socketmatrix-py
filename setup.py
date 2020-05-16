@@ -10,7 +10,7 @@ try:
 except:
     long_description = description
 
-setup(name='sockmatrix',
+setup(name='socketmatrix',
     use_scm_version={
         'version_scheme': 'python-simplified-semver',
         'local_scheme': 'no-local-version',
