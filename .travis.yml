@@ -20,8 +20,10 @@ cache:
 # Build selected versions of PyPy and CPython 3 (env for cibuildwheel, reference: https://cibuildwheel.readthedocs.io/en/stable/options/#build-skip)
 matrix:
   include:
+    - python: pypy3
+      env: BUILD_WHEEL=true BUILD_SDIST=true CIBW_BUILD="pp36*"
     - python: 3.6
-      env: BUILD_WHEEL=true BUILD_SDIST=true CIBW_BUILD="pp36* cp36?-*"
+      env: BUILD_WHEEL=true BUILD_SDIST=true CIBW_BUILD="cp36?-*"
     - python: 3.7
       env: BUILD_WHEEL=true BUILD_SDIST=true CIBW_BUILD="cp37?-*"
     - python: 3.8
@@ -40,6 +42,10 @@ script:
   # - pytest
   # - python setup.py test
   - "./.travis/build.sh"
+
+before_deploy:
+  - ./ci/prepare_deploy.sh $PACKAGE
+
 
 deploy:
   provider: releases
