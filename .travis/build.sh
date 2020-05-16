@@ -19,11 +19,10 @@ if [[ $TRAVIS_OS_NAME == 'osx' ]]; then
 fi
 
 if [[ $BUILD_WHEEL == 'true' ]]; then
-    cibuildwheel --output-dir dist
+    # From https://cibuildwheel.readthedocs.io/en/stable/setup/, travisci section: https://cibuildwheel.readthedocs.io/en/stable/setup/
+    python3 -m cibuildwheel --output-dir dist
 fi
 
 if [[ $BUILD_SDIST == 'true' ]]; then
-    # python setup.py sdist
-    # From https://cibuildwheel.readthedocs.io/en/stable/setup/, travisci section: https://cibuildwheel.readthedocs.io/en/stable/setup/
-    python3 -m cibuildwheel --output-dir dist
+    python setup.py sdist
 fi
