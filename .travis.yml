@@ -43,9 +43,8 @@ script:
   # - python setup.py test
   - "./.travis/build.sh"
 
-before_deploy:
-  - ./ci/prepare_deploy.sh $PACKAGE
-
+# before_deploy:
+#   - ./ci/prepare_deploy.sh $PACKAGE
 
 deploy:
   provider: releases
