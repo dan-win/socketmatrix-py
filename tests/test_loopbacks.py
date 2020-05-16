@@ -1,14 +1,9 @@
 # coding: utf-8
 import unittest
-from unittest.mock import patch
-from contextlib import contextmanager
 
 # import amqrotor
 
-import queue as sync_queue
 # import timeout_decorator
-import threading
-import argparse
 import asyncio
 
 from socketmatrix import (
@@ -20,21 +15,21 @@ from socketmatrix import (
     # stop_services
 )
 
+
 class config:
     def __init__(self, addr):
         self.addr = addr
         self.print = False
         self.ssl = False
 
+
 class test_unix_socket(unittest.TestCase):
 
     def setUp(self):
         ServiceMatrix.cleanup()
 
-
     def tearDown(self):
         ServiceMatrix.cleanup()
-
 
     # @timeout_decorator.timeout(5, timeout_exception=StopIteration)
     def test_channel_integrity_unix(self):
@@ -68,7 +63,7 @@ class test_unix_socket(unittest.TestCase):
                     send_message(dict(data=i))
                 except Exception as e:
                     print("Error in producer: ", e)
-    
+
                 await asyncio.sleep(0.1, loop)
 
             # Pass quit signal after 3 second
@@ -82,7 +77,7 @@ class test_unix_socket(unittest.TestCase):
         loop.set_debug(True)
 
         loop = ServiceMatrix.start_services(conf, loop=loop)
-        
+
         loop.create_task(make_messages(loop))
 
         print("[1] Loop starting...")
@@ -104,4 +99,3 @@ async def send_stop(loop, delay):
         ServiceMatrix.stop_services()
     except Exception as e:
         print("Error on stop_services: ", e)
-
