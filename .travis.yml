@@ -10,7 +10,7 @@ env:
   global:
     - BUILD_WHEEL=true
     - BUILD_SDIST=true
-    - CIBW_BUILD="pp3* cp3?-*""
+    - CIBW_BUILD="pp3* cp3?-*"
     # Only build PyPy and CPython 3 (env for cibuildwheel, reference: https://cibuildwheel.readthedocs.io/en/stable/options/#build-skip)
 
     # command to install dependencies
