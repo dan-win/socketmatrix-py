@@ -27,10 +27,10 @@ setup(name='socketmatrix',
     license='Apache 2.0 / MIT',
     packages=find_packages(),
     python_requires='>=3.6',
-    install_requires=[
-        'uvloop==0.14.0',
-        # 'python-dotenv>=0.10.3',
-    ],
+    install_requires=[],
     extras_require={
+        "uvloop": ['uvloop==0.14.0']
     },
-    zip_safe=False)
+    zip_safe=False,
+    # platforms=['linux'],
+    )

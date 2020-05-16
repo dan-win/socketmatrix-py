@@ -5,11 +5,32 @@ python:
   - "3.8"
   - "3.8-dev"  # 3.8 development branch
   - "nightly"  # nightly build
+  - "pypy3"
+env:
+  global:
+    - BUILD_WHEEL=true
+    - BUILD_SDIST=true
+
 # command to install dependencies
 install:
   # - pip install -r requirements.txt
-  - python setup.py 
-# command to run tests
+  # - python setup.py 
+  - "./.travis/install.sh"
+
+  # command to run tests
 script:
   # - pytest
-  - python setup.py test
+  # - python setup.py test
+  - "./.travis/build.sh"
+
+deploy:
+  provider: releases
+  file:
+  - dist/*.whl
+  - dist/*.tar.gz
+  edge: true
+  file_glob: true
+  on:
+    # repo: simplejson/simplejson
+    tags: true
+  skip_cleanup: true
