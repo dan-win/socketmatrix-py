@@ -20,12 +20,20 @@ import stat
 import logging
 import errno
 from enum import Enum
+import typing
 
 LOGLEVEL = os.environ.get('LOGLEVEL', 'INFO').upper()
 logging.basicConfig(level=LOGLEVEL)
 log = logging
 
 PRINT = 0
+
+# Here is optional dependency
+try:
+    import uvloop
+except Exception:
+    log.warn("uvloop not installed, using default asyncio loop")
+    uvloop = None
 
 
 class ServiceState(Enum):
@@ -37,7 +45,8 @@ class ServiceState(Enum):
     ERROR = -1
 
 
-class JsonConsumerProtocol(asyncio.Protocol):
+class BytesConsumerProtocol(asyncio.Protocol):
+
     def __init__(self, loop):
         self.loop = loop
 
@@ -48,16 +57,46 @@ class JsonConsumerProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         self.transport = None
         self.exc = exc
+    
+    def _preprocess_data(self, data):
+        return data
+    
+    def _decode_topic(self, data):
+        return ""
 
     def data_received(self, data):
-        data = data.decode()
-        data = json.loads(data)
-        topic = data.get("topic", "")
+        data = self._preprocess_data(data)
+        topic = self._decode_topic(data)
         handler = SocketConsumer._handlers.get(topic)
+        print ("handlers",  SocketConsumer._handlers, SocketConsumer._handlers.get(topic))
         if handler:
             handler(data)
         else:
-            log.error('Error 404 no such topic: %s', topic)
+            log.error(
+                'Error 404 no such topic: "%s" for message "%s"',
+                topic,
+                str(data[:32]))
+
+
+class TextConsumerProtocol(BytesConsumerProtocol):
+
+    def _preprocess_data(self, data):
+        return data.decode()
+
+
+class JsonConsumerProtocol(TextConsumerProtocol):
+
+    def _preprocess_data(self, data):
+        data = data.decode()
+        try:
+            return json.loads(data)
+        except Exception as e:
+            msg = str(data[:32])
+            log.error('Cannot decode json: "%s"; %s', msg, e)
+            raise
+
+    def _decode_topic(self, data: typing.Mapping):
+        return data.get("topic", "")
 
 
 class JsonProducerProtocol(asyncio.Protocol):
@@ -75,7 +114,10 @@ class JsonProducerProtocol(asyncio.Protocol):
         self.runner = self.loop.create_task(self.run())
 
     def connection_lost(self, exc):
-        log.warn('The server closed the connection: %s', exc)
+        if exc is not None:
+            log.error('Connection closed with error: "%s"', exc)
+        else:
+            log.warn('The server closed the connection')
         self.stop()
         self.transport = None
         self.queue = None
@@ -91,31 +133,37 @@ class JsonProducerProtocol(asyncio.Protocol):
         log.debug("Producer Protocol: starting relay loop")
         try:
             while True:
-                if self.transport is None:
-                    await asyncio.sleep(1)
-                    continue
-                message = await self.queue.get()
-                if message == SENTINEL or self.transport is None:
-                    log.debug("Producer Protocol: breaking relay loop")
-                    break
-                message["user-agent"] = __name__
-                serialized = json.dumps(message).encode()
-                while True:
-                    try:
-                        self.transport.write(serialized)
-                        self.transport.write(b"\n")
-                    except BlockingIOError:
+                try:
+                    if self.transport is None:
+                        await asyncio.sleep(1)
                         continue
-                    break
+                    message = await self.queue.get()
+                    if message == SENTINEL or self.transport is None:
+                        log.debug("Producer Protocol: breaking relay loop")
+                        break
+                    message["user-agent"] = __name__
+                    serialized = json.dumps(message).encode()
+                    while True:
+                        try:
+                            self.transport.write(serialized)
+                            self.transport.write(b"\n")
+                        except BlockingIOError:
+                            continue
+                        break
 
-                log.debug("Producer Protocol: message sent [Ok]")
-                await asyncio.sleep(0.5)
+                    log.debug("Producer Protocol: message sent [Ok]")
+                    await asyncio.sleep(0.5)
+
+                except asyncio.CancelledError:
+                    log.debug("Protocol loop cancelled...")
+                    return
+
         except Exception as e:
-            log.error("Error in Producer Protocol loop: %s", e)
+            log.error('Error in Producer Protocol loop: "%r"', e)
 
-    async def stop(self):
+    def stop(self):
         if self.transport is not None:
-            self.queue.put(SENTINEL)
+            self.queue.put_nowait(SENTINEL)
 
     async def send_message(self, message):
         await self.queue.put(message)
@@ -158,10 +206,9 @@ class SocketConsumer:
         self.topic = topic or ""
 
     def __call__(self, f):
-        def wrapper(request_bytes):
-            return f(request_bytes)
         topic = self.topic
-        SocketConsumer._handlers[topic] = wrapper
+        SocketConsumer._handlers[topic] = f
+        print("Handler registered", SocketConsumer._handlers)
         return f
 
     @classmethod
@@ -183,7 +230,10 @@ class SocketConsumer:
             server_context.verify_mode = ssl.CERT_NONE
 
         def protocol_factory():
-            return JsonConsumerProtocol(loop)
+            if args.json:
+                return JsonConsumerProtocol(loop)
+            return BytesConsumerProtocol(loop)
+            # return JsonConsumerProtocol(loop)
 
         unix, addr = _decode_address(args.addr)
 
@@ -310,12 +360,16 @@ class SocketProducer:
             self.queue = None
             log.info("Producer - closing connection at %s", addr)
 
+        except asyncio.CancelledError:
+            log.debug("Producer cancelled...")
+            return
+
         except ConnectionRefusedError as e:
             log.error('Connection refused: %s', e)
             return
 
         except Exception as e:
-            log.error('Error in producer: %s: %s', addr, e)
+            log.error('Error in producer: %s: "%r"', addr, e)
 
     async def try_send_message(self, message):
         if self.queue is not None:
@@ -378,10 +432,13 @@ class ServiceMatrix:
             raise StateError()
 
         if loop is None:
-            import uvloop
-            loop = uvloop.new_event_loop()
+            if uvloop:
+                loop = uvloop.new_event_loop()
+                asyncio.set_event_loop(loop)
+            else:
+                loop = asyncio.get_event_loop()
 
-            asyncio.set_event_loop(loop)
+        if LOGLEVEL == 'DEBUG':
             loop.set_debug(True)
 
         cls.loop = loop
@@ -421,18 +478,31 @@ class ServiceMatrix:
         #         s, functools.partial(catch_signal, s, loop))
 
         async def close_all(loop):
+            def get_all_tasks():
+                try:
+                    return asyncio.all_tasks()
+                except Exception:
+                    # Python 3.6?
+                    return asyncio.Task.all_tasks()
+
+            def get_current_task():
+                try:
+                    return asyncio.current_task()
+                except Exception:
+                    # Python 3.6?
+                    return asyncio.Task.current_task()
+
             print("Exit signal occurs........")
             # Run exit code...
 
             await SocketProducer.stop(loop)
             await SocketConsumer.stop(loop)
 
-            print("Exit signal occurs........ 1")
-
             # loop.run_until_complete(srv.close())
+            current_task = get_current_task()
             tasks = [
-                    t for t in asyncio.Task.all_tasks()
-                    if t is not asyncio.Task.current_task()
+                    t for t in get_all_tasks()
+                    if t is not current_task
                 ]
 
             print("Exit signal occurs........ 2")
@@ -440,9 +510,6 @@ class ServiceMatrix:
             [task.cancel() for task in tasks]
             log.info('Cancelling %s outstanding tasks', len(tasks))
             await asyncio.gather(*tasks, return_exceptions=True)
-            loop.stop()
-            loop.close()
-            log.info('All pending tasks are finished now')
 
             log.info("Done")
             cls._STOP_HANDLE = None
@@ -452,9 +519,13 @@ class ServiceMatrix:
             await stop_event.wait()
             await close_all(loop)
 
-        cls.loop.create_task(main(cls.loop))
+        # cls.loop.create_task(main(cls.loop))
         cls._state = ServiceState.RUNNING
-        cls.loop.run_forever()
+        cls.loop.run_until_complete(main(cls.loop))
+        cls.loop.stop()
+        log.debug("We about to close loop................................")
+        cls.loop.close()
+        log.info('All pending tasks are finished now')
 
     @classmethod
     def stop_services(cls):
@@ -538,6 +609,7 @@ if __name__ == '__main__':
     parser.add_argument('--addr', default='127.0.0.1:25000', type=str)
     parser.add_argument('--print', default=False, action='store_true')
     parser.add_argument('--ssl', default=False, action='store_true')
+    parser.add_argument('--json', default=True, action='store_true')
     args = parser.parse_args()
 
     ServiceMatrix.run(args)
